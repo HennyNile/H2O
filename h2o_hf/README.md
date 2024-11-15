@@ -8,7 +8,7 @@
 
 ```
 pip install crfm-helm
-pip install git+https://github.com/huggingface/transformers
+conda install transformers
 pip install lm-eval
 ```
 
