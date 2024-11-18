@@ -1,0 +1,28 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        
+        {
+            "name": "run H2O",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "h2o_hf/run_text_generation.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--model_arch",
+                "llama",
+                "--model_name",
+                "huggyllama/llama-7b",
+                "--recent_ratio",
+                "0.1",
+                "--heavy_ratio",
+                "0.1",
+                "--task",
+                "passkey"
+            ]
+        }
+    ]
+}

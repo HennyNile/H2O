@@ -96,6 +96,14 @@ ENABLE_Heavy_Hitter_FUNCTIONS = {
 }
 
 
+def loadTask(task:str):
+    Load=[]
+    with open(f"InfiniteData/{task}.jsonl","r") as file:
+        lines=file.readlines()
+        for line in lines:
+            Load.append(json.loads(line.strip()))
+    return Load
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -107,9 +115,11 @@ def main():
     parser.add_argument("--recent_ratio", type=float, default=0.1)
 
     parser.add_argument("--length", type=int, default=64)
+    parser.add_argument("--task", type=str, required=True)
 
     parser.add_argument("--seed", type=int, default=42, help="random seed for initialization")
     parser.add_argument("--no_cuda", action="store_true", help="Avoid using CUDA when available")
+    parser.add_argument("--chunk_size", type=int, default=512)
     parser.add_argument(
         "--fp16",
         action="store_true",
@@ -122,10 +132,13 @@ def main():
 
     logger.warning(f"device: {args.device}, n_gpu: {args.n_gpu}, 16-bits training: {args.fp16}")
     set_seed(args)
+    
+    Load=loadTask(args.task)
 
     # Change to your custom prompt text
     # prompt_text = 'In the year 2087, humanity has achieved remarkable technological advancements and established colonies on multiple planets within the Milky Way galaxy. Interstellar travel has become commonplace, with faster-than-light spacecraft enabling people to explore distant star systems. Earth has undergone significant changes due to sustainable development efforts, such as harnessing renewable energy sources and implementing widespread ecological restoration projects. However, alongside these triumphs, new challenges have emerged, including the rise of artificial intelligence, ethical dilemmas surrounding genetic engineering, and interplanetary political tensions. Against this backdrop, a team of intrepid scientists embarks on a mission to uncover the secrets of an ancient alien civilization, hidden deep within an uncharted exoplanet. As they navigate treacherous terrains and encounter otherworldly phenomena, they must confront their own fears and reconcile humanity\'s thirst for knowledge with the potential consequences of uncovering secrets that were better left buried. The fate of both their mission and the future of humanity hang in the balance.'
-    prompt_text = 'In a small, bustling cafe nestled in the heart of a vibrant city, a serendipitous event unfolded, leaving a lasting impression on all who witnessed it. As the patrons sat sipping their coffees and engaging in animated conversations, a talented street musician entered the cafe, carrying a weathered guitar and radiating an aura of creativity.'
+    prompt_text=Load[0]["context"]+Load[0]["input"]
+    # prompt_text = '1+1=?'
 
     model_name = args.model_name
     config = AutoConfig.from_pretrained(model_name, cache_dir=args.cache_dir)
@@ -139,22 +152,94 @@ def main():
     model.half().eval().cuda()
 
     # input_ids = tokenizer(prompt_text, return_tensors='pt').input_ids.to(model.device)
-    input_ids = tokenizer(prompt_text, add_special_tokens=False, return_tensors='pt').input_ids.to(model.device)
+    
 
-    generate_ids = model.generate(input_ids, max_new_tokens=args.length)
-    result = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-    print("################## Generated Context with Full Cache ###################")
-    print(result)
+    # generate_ids = model.generate(input_ids, max_new_tokens=args.length)
+    # result = tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    # print("################## Generated Context with Full Cache ###################")
+    # print(result)
 
 
     ######### Enable HH
+    chunk_size=args.chunk_size
     checkpoint = copy.deepcopy(model.state_dict())
-    model = ENABLE_Heavy_Hitter_FUNCTIONS[args.model_arch](model, config)
+    input_ids = tokenizer(prompt_text, add_special_tokens=False, return_tensors='pt').input_ids.to(model.device)
+
+    max_length=args.length
+    length=input_ids.size(1)
+    end_token_ids = [tokenizer.eos_token_id]
+    attention_mask = torch.ones_like(input_ids)
+    past_key_values=None
+    chunk_sizes=[]
+    for st in range(0, input_ids.size(1) - 1, chunk_size):
+        ed = min(input_ids.size(1) - 1, st + chunk_size)
+        chunk_sizes.append(ed-st)
+    for i in range(max_length + 3): 
+        chunk_sizes.append(1)
+
+    model = ENABLE_Heavy_Hitter_FUNCTIONS[args.model_arch](model, config,chunk_sizes)
     model.load_state_dict(checkpoint)
     model.half().eval().cuda()
 
-    generate_ids_hh = model.generate(input_ids, max_new_tokens=args.length)
-    result_hh = tokenizer.batch_decode(generate_ids_hh, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    
+
+    
+    
+    
+
+    for i in range(max_length + 1):
+        if i == 0:
+            id=0
+            for st in range(0, input_ids.size(1) - 1, chunk_size):
+                print(f"prefill:{st}")
+                ed = min(input_ids.size(1) - 1, st + chunk_size)
+                out = model(
+                    input_ids = input_ids[:, st: ed],
+                    attention_mask = attention_mask[:, :ed],
+                    use_cache = True,
+                    return_dict = True,
+                    past_key_values = past_key_values,
+                    )
+                id=id+1
+                logits, past_key_values = out.logits, out.past_key_values
+
+            out = model(
+                input_ids = input_ids[:, -1:],
+                attention_mask = attention_mask,
+                use_cache = True,
+                return_dict = True,
+                past_key_values = past_key_values,
+            )
+            logits, past_key_values = out.logits, out.past_key_values
+        else:
+            out = model(
+                input_ids = input_ids[:, -1:],
+                attention_mask = attention_mask,
+                past_key_values = past_key_values,
+                return_dict = True,
+                use_cache = True,
+            )
+            logits, past_key_values = out.logits, out.past_key_values
+
+            logits = logits[:, -1, :]
+            word = logits.argmax(dim=-1)
+            if word.item() in end_token_ids or i == max_length:
+                break
+
+            input_ids = torch.cat((input_ids, word.view(1, 1)), dim=-1)
+            attention_mask = torch.cat(
+                (attention_mask, torch.ones((attention_mask.size(0), 1), dtype=torch.int, device=attention_mask.device)),
+                dim=-1
+            )
+            
+
+            past_kv = past_key_values
+    result_hh=[tokenizer.decode(input_ids.squeeze(0)[length:])]
+
+    # generate_ids_hh = model.generate(input_ids, max_new_tokens=args.length)
+    
+    # result_hh = tokenizer.batch_decode(generate_ids_hh, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+    
     print("################## Generated Context with Heavy Hitter Oracle ###################")
     print(result_hh)
 

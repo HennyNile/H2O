@@ -24,8 +24,10 @@ __all__ = ['convert_kvcache_llama_heavy_recent', 'LlamaAttention_heavy_hitter']
 class LlamaAttention_heavy_hitter(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig, layer_idx: int):
+    def __init__(self, config: LlamaConfig, chunk_sizes:list,layer_idx: int):
         super().__init__()
+        self.chunk_id=0
+        self.chunk_sizes=chunk_sizes
         self.config = config
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -75,6 +77,10 @@ class LlamaAttention_heavy_hitter(nn.Module):
         use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        chunk_next_size = self.chunk_sizes[self.chunk_id+1]
+        chunk_size_cur = self.chunk_sizes[self.chunk_id]
+        self.chunk_id=self.chunk_id+1
+        
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -129,7 +135,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         # Accumulate attention scores
         if not self.previous_scores == None:
-            current_scores_sum[:, :-1] += self.previous_scores #(Enlarged Sequence)
+            current_scores_sum[:, :-chunk_size_cur] += self.previous_scores #(Enlarged Sequence)
         else:
             self.heavy_budget = int(self.heavy_budget_ratio * current_scores_sum.shape[-1])
             self.recent_budget = int(self.recent_budget_ratio * current_scores_sum.shape[-1])
@@ -142,7 +148,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
         attn_weights_devices = attn_weights.device
         assert attn_weights.shape[0] == 1
         self.previous_scores = current_scores_sum #(heads, k-tokens)
-        attn_mask = torch.ones(current_scores_sum.shape[0], current_scores_sum.shape[1]+1).to(dtype_attn_weights).to(attn_weights_devices)
+        attn_mask = torch.ones(current_scores_sum.shape[0], current_scores_sum.shape[1]+chunk_next_size).to(dtype_attn_weights).to(attn_weights_devices)
 
         attn_tokens_all = self.previous_scores.shape[-1]
     
@@ -163,7 +169,7 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
         self.attention_masks_next = attn_mask.clone().unsqueeze(0).unsqueeze(2)
 
-        score_mask = attn_mask[:,:-1]
+        score_mask = attn_mask[:,:-chunk_next_size]
         score_mask[:, -self.recent_budget:] = 1
         self.previous_scores = self.previous_scores * score_mask
 
@@ -187,15 +193,15 @@ class LlamaAttention_heavy_hitter(nn.Module):
 
 
 
-def convert_kvcache_llama_heavy_recent(model, config, parent_name=None):
+def convert_kvcache_llama_heavy_recent(model, config, chunk_sizes,parent_name=None):
 
     for name, module in reversed(model._modules.items()):
 
         if len(list(module.children())) > 0:
-            model._modules[name] = convert_kvcache_llama_heavy_recent(module, config, name)
+            model._modules[name] = convert_kvcache_llama_heavy_recent(module, config, chunk_sizes,name)
 
         if isinstance(module, LlamaAttention):
-            model._modules[name] = LlamaAttention_heavy_hitter(config, int(parent_name))
+            model._modules[name] = LlamaAttention_heavy_hitter(config, chunk_sizes,int(parent_name))
 
     return model
 
